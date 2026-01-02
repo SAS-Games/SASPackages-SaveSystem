@@ -1,0 +1,16 @@
+{
+    "name": "AssemblySave",
+    "rootNamespace": "",
+    "references": [
+        "GUID:13cf59ac3f7b5964191f0da506f45fe2"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}
