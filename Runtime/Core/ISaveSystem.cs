@@ -28,5 +28,5 @@ public interface ISaveSystem : IBindable
     /// <param name="fileName">The name of the file to save data to.</param>
     /// <param name="data">The data to be saved.</param>
     /// <returns>A Task representing the asynchronous save operation.</returns>
-    Task Save<T>(int userId, string dirName, string fileName, T data);
+    Task<bool> Save<T>(int userId, string dirName, string fileName, T data);
 }

@@ -3,13 +3,15 @@ using System.Collections.Concurrent;
 using System.Threading.Tasks;
 using UnityEngine;
 
-public struct SaveRequest
+public sealed class SaveRequest
 {
-    public int UserId;
-    public string DirName;
-    public string FileName;
-    public object Data;
+    public readonly int UserId;
+    public readonly string DirName;
+    public readonly string FileName;
+    public readonly object Data;
 
+    public readonly string Key;
+    public readonly TaskCompletionSource<bool> Completion;
 
     public SaveRequest(int userId, string dirName, string fileName, object data)
     {
@@ -17,18 +19,24 @@ public struct SaveRequest
         DirName = dirName;
         FileName = fileName;
         Data = data;
+
+        Key = $"{dirName}/{userId}/{fileName}";
+
+        Completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
-
 public class SaveQueueManager
 {
-    private readonly ConcurrentQueue<SaveRequest> _queue = new ConcurrentQueue<SaveRequest>();
+    private readonly ConcurrentQueue<SaveRequest> _queue = new();
+    private readonly ConcurrentDictionary<string, SaveRequest> _pendingByKey = new();
+
     private readonly Func<SaveRequest, Task> _processor;
 
-    private Task _backgroundTask;
-    private readonly object _workerLock = new object();
-    private volatile bool _isRunning = false;
-    private volatile bool _isFlushing = false;
+    private readonly object _workerLock = new();
+
+    private Task _workerTask;
+    private volatile bool _isRunning;
+    private volatile bool _isFlushing;
 
     public SaveQueueManager(Func<SaveRequest, Task> processor)
     {
@@ -37,6 +45,11 @@ public class SaveQueueManager
 
     public void Enqueue(SaveRequest req)
     {
+        // Merge saves (latest replaces previous)
+        if (_pendingByKey.TryGetValue(req.Key, out var old))
+            old.Completion.TrySetResult(false);
+
+        _pendingByKey[req.Key] = req;
         _queue.Enqueue(req);
 
         if (_isFlushing)
@@ -49,11 +62,11 @@ public class SaveQueueManager
     {
         lock (_workerLock)
         {
-            if (_isFlushing) return;        // Prevent race with Flush
-            if (_isRunning) return;
+            if (_isRunning || _isFlushing)
+                return;
 
             _isRunning = true;
-            _backgroundTask = Task.Run(ProcessQueueAsync);
+            _workerTask = Task.Run(ProcessQueueAsync);
         }
     }
 
@@ -63,13 +76,19 @@ public class SaveQueueManager
         {
             while (_queue.TryDequeue(out var req))
             {
+                // Skip outdated merged saves
+                if (!_pendingByKey.TryRemove(req.Key, out var latest) || latest != req)
+                    continue;
+
                 try
                 {
                     await _processor(req).ConfigureAwait(false);
+                    req.Completion.TrySetResult(true);
                 }
                 catch (Exception ex)
                 {
-                    Debug.LogError($"[SaveQueue] Error processing save: {ex}");
+                    Debug.LogError($"[SaveQueue] Save failed: {ex}");
+                    req.Completion.TrySetResult(false);
                 }
             }
         }
@@ -77,15 +96,14 @@ public class SaveQueueManager
         {
             _isRunning = false;
 
-            // If more items were added during a race window, restart worker
             if (!_isFlushing && !_queue.IsEmpty)
                 EnsureWorkerRunning();
         }
     }
 
     /// <summary>
-    /// Flushes all save requests. Blocks calling thread until complete.
-    /// Safe to call from OnApplicationQuit.
+    /// Blocks caller until all saves finish.
+    /// Call during OnApplicationQuit.
     /// </summary>
     public void Flush()
     {
@@ -93,25 +111,24 @@ public class SaveQueueManager
         {
             _isFlushing = true;
 
-            // Drain queue synchronously
             while (_queue.TryDequeue(out var req))
             {
+                if (!_pendingByKey.TryRemove(req.Key, out _))
+                    continue;
+
                 try
                 {
-                    var task = _processor(req);
-                    task.GetAwaiter().GetResult();
+                    _processor(req).GetAwaiter().GetResult();
+                    req.Completion.TrySetResult(true);
                 }
                 catch (Exception ex)
                 {
                     Debug.LogError($"[SaveQueue] Flush error: {ex}");
+                    req.Completion.TrySetResult(false);
                 }
             }
 
-            // Ensure background worker finishes
-            try
-            {
-                _backgroundTask?.Wait();
-            }
+            try { _workerTask?.Wait(); }
             catch { }
 
             _isRunning = false;

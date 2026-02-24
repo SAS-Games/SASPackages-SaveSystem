@@ -6,6 +6,7 @@ using UnityEngine;
 public abstract class FileSaveSystemBase : ISaveSystem
 {
     private readonly string _rootDir = Application.persistentDataPath;
+
     protected abstract IDataSerializer Serializer { get; }
 
     private readonly SaveQueueManager _queueManager;
@@ -14,7 +15,7 @@ public abstract class FileSaveSystemBase : ISaveSystem
     {
         _queueManager = new SaveQueueManager(ProcessSaveRequestAsync);
     }
-
+    
     public async Task<T> Load<T>(int userId, string dirName, string fileName) where T : new()
     {
         string filePath = GetFilePath(userId, dirName, fileName);
@@ -33,11 +34,12 @@ public abstract class FileSaveSystemBase : ISaveSystem
             return new T();
         }
     }
-
-    public Task Save<T>(int userId, string dirName, string fileName, T data)
+    
+    public Task<bool> Save<T>(int userId, string dirName, string fileName, T data)
     {
-        _queueManager.Enqueue(new SaveRequest(userId, dirName, fileName, data));
-        return Task.CompletedTask;
+        var request = new SaveRequest(userId, dirName, fileName, data);
+        _queueManager.Enqueue(request);
+        return request.Completion.Task;
     }
 
     private Task ProcessSaveRequestAsync(SaveRequest req)
@@ -52,37 +54,29 @@ public abstract class FileSaveSystemBase : ISaveSystem
 
         EnsureDirectoryExists(filePath);
 
+        byte[] bytes = Serializer.Serialize(req.Data);
+
+        await File.WriteAllBytesAsync(tempPath, bytes).ConfigureAwait(false);
+
         try
         {
-            byte[] bytes = Serializer.Serialize(req.Data);
-            await File.WriteAllBytesAsync(tempPath, bytes).ConfigureAwait(false);
-
-            try
-            {
-                if (File.Exists(filePath))
-                    File.Replace(tempPath, filePath, null);
-                else
-                    File.Move(tempPath, filePath);
-            }
-            catch
-            {
-                // Fallback: try to remove the old file and move the temp in place
-                if (File.Exists(filePath))
-                    File.Delete(filePath);
+            if (File.Exists(filePath))
+                File.Replace(tempPath, filePath, null);
+            else
                 File.Move(tempPath, filePath);
-            }
         }
-        catch (Exception ex)
+        catch
         {
-            Debug.LogError($"[SaveSystem] Atomic save failed: {ex}");
-            if (File.Exists(tempPath))
-                File.Delete(tempPath);
+            if (File.Exists(filePath))
+                File.Delete(filePath);
+
+            File.Move(tempPath, filePath);
         }
     }
-
+    
     private string GetFilePath(int userId, string dirName, string fileName)
     {
-        return Path.Combine(_rootDir, dirName, userId.ToString(), fileName + Serializer.FileExtension);
+        return Path.Combine(_rootDir, userId.ToString(), dirName, fileName + Serializer.FileExtension);
     }
 
     private void EnsureDirectoryExists(string filePath)
@@ -91,11 +85,7 @@ public abstract class FileSaveSystemBase : ISaveSystem
         if (!Directory.Exists(dir))
             Directory.CreateDirectory(dir);
     }
-
-    /// <summary>
-    /// Drain the queue synchronously on the caller thread. Blocks until queue is empty.
-    /// Typically called on application quit to guarantee all saves complete.
-    /// </summary>
+    
     public void Flush()
     {
         _queueManager.Flush();

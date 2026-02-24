@@ -245,7 +245,6 @@ public static class FlexPrefs
     private static void EnsureInitialized()
     {
         if (_saveSystem == null)
-            throw new InvalidOperationException(
-                "FlexPrefs not initialized. Call FlexPrefs.Initialize(saveSystem) first.");
+            throw new InvalidOperationException("FlexPrefs not initialized. Call FlexPrefs.Initialize(saveSystem) first.");
     }
 }
