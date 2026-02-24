@@ -45,11 +45,16 @@ public class SaveQueueManager
 
     public void Enqueue(SaveRequest req)
     {
-        // Merge saves (latest replaces previous)
-        if (_pendingByKey.TryGetValue(req.Key, out var old))
-            old.Completion.TrySetResult(false);
+        var previous = _pendingByKey.AddOrUpdate(
+            req.Key,
+            req,
+            (_, old) =>
+            {
+                Debug.Log($"[SaveQueue] Replaced pending save: {req.Key}");
+                old.Completion.TrySetResult(true);
+                return req;
+            });
 
-        _pendingByKey[req.Key] = req;
         _queue.Enqueue(req);
 
         if (_isFlushing)
