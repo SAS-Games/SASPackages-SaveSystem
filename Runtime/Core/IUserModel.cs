@@ -1,6 +1,4 @@
-using SAS.Core.TagSystem;
-
-public interface IUserModel : IBindable
+public interface IUserModel 
 {
     int GetActiveUserId();
 }

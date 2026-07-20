@@ -5,20 +5,21 @@ using UnityEngine;
 
 public abstract class FileSaveSystemBase : ISaveSystem
 {
-    private readonly string _rootDir = Application.persistentDataPath;
-
+    private string _rootDir;
+    private string RootDir => _rootDir;
     protected abstract IDataSerializer Serializer { get; }
 
     private readonly SaveQueueManager _queueManager;
 
-    protected FileSaveSystemBase()
+    protected FileSaveSystemBase(string rootDirPath)
     {
+        _rootDir = rootDirPath;
         _queueManager = new SaveQueueManager(ProcessSaveRequestAsync);
     }
-    
+
     public async Task<T> Load<T>(int userId, string dirName, string fileName) where T : new()
     {
-        string filePath = GetFilePath(userId, dirName, fileName);
+        string filePath =  PathExtensions.GetFilePath(userId, RootDir, dirName, fileName, Serializer.FileExtension);
 
         if (!File.Exists(filePath))
             return new T();
@@ -26,7 +27,7 @@ public abstract class FileSaveSystemBase : ISaveSystem
         try
         {
             var bytes = await File.ReadAllBytesAsync(filePath).ConfigureAwait(false);
-            return Serializer.Deserialize<T>(bytes);
+            return Serializer.Deserialize<T>(bytes, userId, dirName, fileName);
         }
         catch (Exception ex)
         {
@@ -34,12 +35,36 @@ public abstract class FileSaveSystemBase : ISaveSystem
             return new T();
         }
     }
-    
+
     public Task<bool> Save<T>(int userId, string dirName, string fileName, T data)
     {
         var request = new SaveRequest(userId, dirName, fileName, data);
         _queueManager.Enqueue(request);
         return request.Completion.Task;
+    }
+
+    public Task DeleteFile(int userId, string dir, string fileName)
+    {
+        string filePath = PathExtensions.GetFilePath(userId, RootDir, dir, fileName, Serializer.FileExtension);
+        if (!File.Exists(filePath))
+        {
+            Debug.LogWarning($"[SaveSystem] File not found: {filePath}");
+            return Task.CompletedTask;
+        }
+        File.Delete(filePath);
+        return Task.CompletedTask;
+    }
+
+    public Task DeleteDirectory(int userId, string dirName)
+    {
+        string dirPath = PathExtensions.GetDirectoryPath(userId, RootDir, dirName);
+        if (!Directory.Exists(dirPath))
+        {
+            Debug.LogWarning($"[SaveSystem] Directory not found: {dirPath}");
+            return Task.CompletedTask;
+        }
+        Directory.Delete(dirPath, true);
+        return Task.CompletedTask;
     }
 
     private Task ProcessSaveRequestAsync(SaveRequest req)
@@ -49,12 +74,12 @@ public abstract class FileSaveSystemBase : ISaveSystem
 
     private async Task SaveAtomicAsync(SaveRequest req)
     {
-        string filePath = GetFilePath(req.UserId, req.DirName, req.FileName);
+        string filePath = PathExtensions.GetFilePath(req.UserId, RootDir, req.DirName, req.FileName, Serializer.FileExtension);
         string tempPath = filePath + ".tmp";
 
-        EnsureDirectoryExists(filePath);
+        PathExtensions.EnsureDirectoryExists(filePath);
 
-        byte[] bytes = Serializer.Serialize(req.Data);
+        byte[] bytes = Serializer.Serialize(req.Data, req.UserId, req.DirName, req.FileName);
 
         await File.WriteAllBytesAsync(tempPath, bytes).ConfigureAwait(false);
 
@@ -72,22 +97,5 @@ public abstract class FileSaveSystemBase : ISaveSystem
 
             File.Move(tempPath, filePath);
         }
-    }
-    
-    private string GetFilePath(int userId, string dirName, string fileName)
-    {
-        return Path.Combine(_rootDir, userId.ToString(), dirName, fileName + Serializer.FileExtension);
-    }
-
-    private void EnsureDirectoryExists(string filePath)
-    {
-        var dir = Path.GetDirectoryName(filePath);
-        if (!Directory.Exists(dir))
-            Directory.CreateDirectory(dir);
-    }
-    
-    public void Flush()
-    {
-        _queueManager.Flush();
     }
 }

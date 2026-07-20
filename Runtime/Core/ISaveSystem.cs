@@ -1,11 +1,10 @@
-using SAS.Core.TagSystem;
 using System.Threading.Tasks;
 
 /// <summary>
 /// Interface for a save system that handles loading and saving data asynchronously,
 /// supporting binding through the IBindable interface.
 /// </summary>
-public interface ISaveSystem : IBindable
+public interface ISaveSystem 
 {
     /// <summary>
     /// Asynchronously loads data of the specified type from the specified directory and file name.
@@ -29,4 +28,7 @@ public interface ISaveSystem : IBindable
     /// <param name="data">The data to be saved.</param>
     /// <returns>A Task representing the asynchronous save operation.</returns>
     Task<bool> Save<T>(int userId, string dirName, string fileName, T data);
+    
+    Task DeleteFile(int userId, string dir, string fileName);
+    Task DeleteDirectory(int userId, string dirName);
 }

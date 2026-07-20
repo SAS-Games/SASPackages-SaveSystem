@@ -1,143 +1,153 @@
 using System;
-using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using UnityEngine;
 
 public sealed class SaveRequest
 {
-    public readonly int UserId;
-    public readonly string DirName;
-    public readonly string FileName;
-    public readonly object Data;
+    public int UserId { get; }
+    public string DirName { get; }
+    public string FileName { get; }
+    public object Data { get; }
 
-    public readonly string Key;
-    public readonly TaskCompletionSource<bool> Completion;
+    public string Key { get; }
+
+    internal TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task<bool> Task => Completion.Task;
 
     public SaveRequest(int userId, string dirName, string fileName, object data)
     {
+        if (string.IsNullOrWhiteSpace(dirName))
+            throw new ArgumentException("Directory name cannot be null or empty.", nameof(dirName));
+
+        if (string.IsNullOrWhiteSpace(fileName))
+            throw new ArgumentException("File name cannot be null or empty.", nameof(fileName));
+
         UserId = userId;
         DirName = dirName;
         FileName = fileName;
-        Data = data;
+        Data = data ?? throw new ArgumentNullException(nameof(data));
 
-        Key = $"{dirName}/{userId}/{fileName}";
-
-        Completion = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Key = $"{DirName}/{UserId}/{FileName}";
     }
 }
-public class SaveQueueManager
+
+public sealed class SaveQueueManager
 {
-    private readonly ConcurrentQueue<SaveRequest> _queue = new();
-    private readonly ConcurrentDictionary<string, SaveRequest> _pendingByKey = new();
+    private readonly object _gate = new();
+
+    private readonly Queue<SaveRequest> _queue = new();
+    private readonly Dictionary<string, SaveRequest> _pendingByKey = new();
 
     private readonly Func<SaveRequest, Task> _processor;
 
-    private readonly object _workerLock = new();
-
-    private Task _workerTask;
-    private volatile bool _isRunning;
-    private volatile bool _isFlushing;
+    private bool _isProcessing;
 
     public SaveQueueManager(Func<SaveRequest, Task> processor)
     {
         _processor = processor ?? throw new ArgumentNullException(nameof(processor));
     }
 
-    public void Enqueue(SaveRequest req)
+    public Task<bool> Enqueue(SaveRequest request)
     {
-        var previous = _pendingByKey.AddOrUpdate(
-            req.Key,
-            req,
-            (_, old) =>
+        if (request == null)
+            throw new ArgumentNullException(nameof(request));
+
+        SaveRequest supersededRequest = null;
+        var startProcessor = false;
+
+        lock (_gate)
+        {
+            if (_pendingByKey.TryGetValue(request.Key, out supersededRequest))
             {
-                Debug.Log($"[SaveQueue] Replaced pending save: {req.Key}");
-                old.Completion.TrySetResult(true);
-                return req;
-            });
-
-        _queue.Enqueue(req);
-
-        if (_isFlushing)
-            return;
-
-        EnsureWorkerRunning();
-    }
-
-    private void EnsureWorkerRunning()
-    {
-        lock (_workerLock)
-        {
-            if (_isRunning || _isFlushing)
-                return;
-
-            _isRunning = true;
-            _workerTask = Task.Run(ProcessQueueAsync);
-        }
-    }
-
-    private async Task ProcessQueueAsync()
-    {
-        try
-        {
-            while (_queue.TryDequeue(out var req))
-            {
-                // Skip outdated merged saves
-                if (!_pendingByKey.TryRemove(req.Key, out var latest) || latest != req)
-                    continue;
-
-                try
-                {
-                    await _processor(req).ConfigureAwait(false);
-                    req.Completion.TrySetResult(true);
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[SaveQueue] Save failed: {ex}");
-                    req.Completion.TrySetResult(false);
-                }
-            }
-        }
-        finally
-        {
-            _isRunning = false;
-
-            if (!_isFlushing && !_queue.IsEmpty)
-                EnsureWorkerRunning();
-        }
-    }
-
-    /// <summary>
-    /// Blocks caller until all saves finish.
-    /// Call during OnApplicationQuit.
-    /// </summary>
-    public void Flush()
-    {
-        lock (_workerLock)
-        {
-            _isFlushing = true;
-
-            while (_queue.TryDequeue(out var req))
-            {
-                if (!_pendingByKey.TryRemove(req.Key, out _))
-                    continue;
-
-                try
-                {
-                    _processor(req).GetAwaiter().GetResult();
-                    req.Completion.TrySetResult(true);
-                }
-                catch (Exception ex)
-                {
-                    Debug.LogError($"[SaveQueue] Flush error: {ex}");
-                    req.Completion.TrySetResult(false);
-                }
+                Debug.Log($"[SaveQueue] Replace → {request.Key}");
             }
 
-            try { _workerTask?.Wait(); }
-            catch { }
+            _pendingByKey[request.Key] = request;
+            _queue.Enqueue(request);
 
-            _isRunning = false;
-            _isFlushing = false;
+            if (!_isProcessing)
+            {
+                _isProcessing = true;
+                startProcessor = true;
+            }
         }
+
+        // This request's exact data will not be saved.
+        supersededRequest?.Completion.TrySetCanceled();
+
+        if (startProcessor)
+        {
+            _ = ProcessAsync();
+        }
+
+        return request.Task;
+    }
+
+    private async Task ProcessAsync()
+    {
+        while (true)
+        {
+            SaveRequest request;
+
+            lock (_gate)
+            {
+                request = GetNextValidRequestLocked();
+
+                if (request == null)
+                {
+                    _isProcessing = false;
+                    return;
+                }
+
+                /*
+                 * Remove before processing.
+                 *
+                 * If another request with the same key is enqueued while
+                 * this one is being written, it becomes a new pending save
+                 * and will run after the current save.
+                 */
+                _pendingByKey.Remove(request.Key);
+            }
+
+            try
+            {
+                await _processor(request);
+
+                request.Completion.TrySetResult(true);
+            }
+            catch (OperationCanceledException)
+            {
+                request.Completion.TrySetCanceled();
+            }
+            catch (Exception exception)
+            {
+                Debug.LogError(
+                    $"[SaveQueue] ERROR {request.Key}\n{exception}");
+
+                request.Completion.TrySetException(exception);
+            }
+        }
+    }
+
+    private SaveRequest GetNextValidRequestLocked()
+    {
+        while (_queue.Count > 0)
+        {
+            var request = _queue.Dequeue();
+
+            if (_pendingByKey.TryGetValue(
+                    request.Key,
+                    out var latest) &&
+                ReferenceEquals(latest, request))
+            {
+                return request;
+            }
+
+            // This request was replaced by a newer request.
+        }
+
+        return null;
     }
 }

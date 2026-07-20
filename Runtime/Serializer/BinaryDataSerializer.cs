@@ -1,4 +1,3 @@
-using System;
 using System.IO;
 using System.Runtime.Serialization.Formatters.Binary;
 
@@ -6,7 +5,7 @@ public class BinaryDataSerializer : IDataSerializer
 {
     public string FileExtension => ".dat";
 
-    public byte[] Serialize<T>(T data)
+    public byte[] Serialize<T>(T data, int userId, string dir, string fileName)
     {
 #pragma warning disable SYSLIB0011
         using (var ms = new MemoryStream())
@@ -18,7 +17,7 @@ public class BinaryDataSerializer : IDataSerializer
 #pragma warning restore SYSLIB0011
     }
 
-    public T Deserialize<T>(byte[] bytes)
+    public T Deserialize<T>(byte[] bytes, int userId, string dir, string fileName)
     {
 #pragma warning disable SYSLIB0011
         using (var ms = new MemoryStream(bytes))

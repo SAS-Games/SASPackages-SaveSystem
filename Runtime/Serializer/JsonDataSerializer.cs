@@ -5,13 +5,13 @@ public class JsonDataSerializer : IDataSerializer
 {
     public string FileExtension => ".json";
 
-    public byte[] Serialize<T>(T data)
+    public byte[] Serialize<T>(T data, int userId, string dir, string fileName)
     {
         string json = JsonConvert.SerializeObject(data, JsonSettings.Settings);
         return Encoding.UTF8.GetBytes(json);
     }
 
-    public T Deserialize<T>(byte[] bytes)
+    public T Deserialize<T>(byte[] bytes, int userId, string dir, string fileName)
     {
         string json = Encoding.UTF8.GetString(bytes);
         return JsonConvert.DeserializeObject<T>(json, JsonSettings.Settings);
